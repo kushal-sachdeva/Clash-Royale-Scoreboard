@@ -1,4 +1,4 @@
-# Clash Royale Scoreboard 
+# Clash Royale Scoreboard 1
 
 A fun little side project I hacked together in just a couple of hours for me and my friends’ Clash group.  
 It’s basically a **live scoreboard** where we can add matchups, track wins/losses, and keep things a bit competitive.
