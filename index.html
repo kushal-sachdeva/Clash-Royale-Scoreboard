@@ -77,7 +77,7 @@ input[type="search"]{grid-column:1/-1}
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 <script>
-/* ---------- Firebase init (your config) ---------- */
+/* ---------- Firebase init ---------- */
 const firebaseConfig = {
   apiKey: "AIzaSyClcpvLfQy4OiiuDhAUxOFqqUgst474tAA",
   authDomain: "clashroyalescore-362e0.firebaseapp.com",
@@ -92,7 +92,7 @@ const db = firebase.firestore();
 
 /* ---------- Constants & helpers ---------- */
 const SCORE_COOLDOWN_MS = 120000;  // 2 min for +1
-const ARM_WINDOW_MS     = 600000;  // 10 min arm window for reset (two-tap)
+const ARM_WINDOW_MS     = 600000;  // 10 min arm window for reset/delete
 
 const $  = (q)=>document.querySelector(q);
 const $$ = (q)=>document.querySelectorAll(q);
@@ -121,21 +121,25 @@ const remainingArm = (ts)=>{
   return Math.max(0, ARM_WINDOW_MS - (Date.now() - t));
 };
 
-/* State cache for live countdown updates */
-let __docs = []; // array of {id, a,b,title, sa,sb, createdMs, lastUpdate, resetArmAt}
+/* Live state cache for countdowns */
+let __docs = []; // {id,a,b,title,sa,sb,createdMs,lastUpdate,resetArmAt,deleteArmAt}
 
-/* UI builders */
+/* UI helpers */
 const badge = (cls, text)=> `<span class="badge ${cls}">${text}</span>`;
 
 const cardHTML = (it)=>{
   const scoreRem = remainingScore(it);
   const scoreReady = scoreRem === 0;
 
-  const armRem = remainingArm(it.resetArmAt);
-  const isArmed = !!it.resetArmAt;
-  const resetLabel = !isArmed
-    ? 'Reset: Tap to arm'
-    : (armRem === 0 ? 'Reset: Ready to confirm' : `Reset: Armed — Wait ${human(armRem)}`);
+  const rRem = remainingArm(it.resetArmAt);
+  const rArmed = !!it.resetArmAt;
+  const resetLabel = !rArmed ? 'Reset: Tap to arm'
+                    : (rRem===0 ? 'Reset: Ready to confirm' : `Reset: Armed — Wait ${human(rRem)}`);
+
+  const dRem = remainingArm(it.deleteArmAt);
+  const dArmed = !!it.deleteArmAt;
+  const deleteLabel = !dArmed ? 'Delete: Tap to arm'
+                     : (dRem===0 ? 'Delete: Ready to confirm' : `Delete: Armed — Wait ${human(dRem)}`);
 
   return `
   <div class="card" data-id="${it.id}">
@@ -149,7 +153,8 @@ const cardHTML = (it)=>{
       </div>
       <div class="toolbar">
         ${scoreReady ? badge('ok','Score: Ready') : badge('wait',`Score: Wait ${human(scoreRem)}`)}
-        ${!isArmed ? badge('', resetLabel) : (armRem===0 ? badge('ok', resetLabel) : badge('wait', resetLabel))}
+        ${!rArmed ? badge('',resetLabel) : (rRem===0 ? badge('ok',resetLabel) : badge('wait',resetLabel))}
+        ${!dArmed ? badge('',deleteLabel) : (dRem===0 ? badge('ok',deleteLabel) : badge('wait',deleteLabel))}
       </div>
     </div>
 
@@ -165,15 +170,15 @@ const cardHTML = (it)=>{
       <div class="small">Last score add: ${it.lastUpdate ? it.lastUpdate.toDate().toLocaleString() : '—'}</div>
       <div class="controls">
         <button class="button secondary" data-action="reset">Reset</button>
-        <!-- Delete intentionally omitted per your latest request -->
+        <button class="button secondary" data-action="delete">Delete</button>
       </div>
     </div>
   </div>`;
 };
 
-/* Render shell (listeners + list fill; actions will be in Part 2) */
+/* Render shell (wire rename here; actions come in Part 2) */
 const render = (docs)=>{
-  __docs = docs; // save latest snapshot
+  __docs = docs;
 
   const q = $('#search').value.trim().toLowerCase();
   const items = docs
@@ -183,13 +188,12 @@ const render = (docs)=>{
   $('#list').innerHTML = items.map(cardHTML).join('');
   $('#empty').style.display = items.length ? 'none' : 'block';
 
-  // Attach inline rename listeners (actions wired in Part 2)
   $$('#list .card .editable').forEach(n=>{
     n.addEventListener('click', ()=>{
       const id = n.closest('.card').dataset.id;
       const side = n.getAttribute('data-side');
       const next = prompt('Rename', n.textContent);
-      if (next) rename(id, side, next);
+      if (next && next.trim()) rename(id, side, next.trim());
     });
   });
 };
@@ -201,18 +205,19 @@ const addMatchup = async ()=>{
   const title = $('#t').value.trim();
   if (!a || !b) return toast('Enter both player names');
 
+  // Minimal create payload (matches strict Firestore rules)
   await coll().add({
     a, b, title,
     sa: 0, sb: 0,
     created: firebase.firestore.FieldValue.serverTimestamp()
-    // Do NOT send lastUpdate/resetArmAt here
+    // Do NOT include lastUpdate/resetArmAt/deleteArmAt here
   });
 
   $('#a').value=''; $('#b').value=''; $('#t').value='';
 };
 
 const rename = async (id, side, name)=>{
-  await coll().doc(id).update(side==='a'?{a:name.trim()}:{b:name.trim()});
+  await coll().doc(id).update(side==='a' ? { a: name } : { b: name });
 };
 
 const bump = async (id, side)=>{
@@ -238,24 +243,18 @@ const bump = async (id, side)=>{
 const onReset = async (id)=>{
   const ref = coll().doc(id);
   const snap = await ref.get(); if (!snap.exists) return;
-  const d = snap.data();
-  const title = d.title || '';
+  const d = snap.data(); const title = d.title || '';
+  const armed = !!d.resetArmAt; const rem = remainingArm(d.resetArmAt);
 
-  const armRem = remainingArm(d.resetArmAt);
-  const armed  = !!d.resetArmAt;
-
-  // First tap → arm
+  // First tap -> arm
   if (!armed) {
     await ref.update({ resetArmAt: firebase.firestore.FieldValue.serverTimestamp() });
     return toast('Reset armed — come back in 10 minutes, then tap Reset again to confirm.', title);
   }
+  // Too early
+  if (rem > 0) return toast(`Reset armed — ${human(rem)} left before you can confirm.`, title);
 
-  // Early second tap → show remaining time
-  if (armRem > 0) {
-    return toast(`Reset armed — ${human(armRem)} left before you can confirm.`, title);
-  }
-
-  // Second tap after 10 min → perform reset
+  // Second tap after 10m -> perform reset
   await db.runTransaction(async (tx)=>{
     const s = await tx.get(ref); if (!s.exists) throw new Error('missing');
     tx.update(ref, { sa:0, sb:0, lastUpdate:null, resetArmAt:null });
@@ -263,10 +262,29 @@ const onReset = async (id)=>{
   toast('Reset complete', title);
 };
 
+const onDelete = async (id)=>{
+  const ref = coll().doc(id);
+  const snap = await ref.get(); if (!snap.exists) return;
+  const d = snap.data(); const title = d.title || '';
+  const armed = !!d.deleteArmAt; const rem = remainingArm(d.deleteArmAt);
+
+  // First tap -> arm
+  if (!armed) {
+    await ref.update({ deleteArmAt: firebase.firestore.FieldValue.serverTimestamp() });
+    return toast('Delete armed — come back in 10 minutes, then tap Delete again to confirm.', title);
+  }
+  // Too early
+  if (rem > 0) return toast(`Delete armed — ${human(rem)} left before you can confirm.`, title);
+
+  // Second tap after 10m -> delete
+  await ref.delete();
+  toast('Matchup deleted', title);
+};
+
 /* ---------- Live listeners ---------- */
 
-// Real-time snapshot
 let unsubscribe = null;
+
 const listen = ()=>{
   if (unsubscribe) unsubscribe();
   unsubscribe = coll().orderBy('created','desc').onSnapshot((snap)=>{
@@ -280,63 +298,73 @@ const listen = ()=>{
         created: x.created || null,
         createdMs: x.created ? x.created.toMillis() : 0,
         lastUpdate: x.lastUpdate || null,
-        resetArmAt: x.resetArmAt || null
+        resetArmAt: x.resetArmAt || null,
+        deleteArmAt: x.deleteArmAt || null
       });
     });
     render(docs);
-    wireActions(); // attach handlers to new DOM
+    wireActions(); // attach handlers to the freshly rendered DOM
   });
 };
 
-// Attach handlers to card buttons
 function wireActions(){
   $$('#list .card').forEach(card=>{
     const id = card.dataset.id;
     card.querySelector('[data-action="plusA"]').onclick = ()=> bump(id,'a');
     card.querySelector('[data-action="plusB"]').onclick = ()=> bump(id,'b');
     card.querySelector('[data-action="reset"]').onclick = ()=> onReset(id);
+    card.querySelector('[data-action="delete"]').onclick = ()=> onDelete(id);
   });
 }
 
 /* ---------- Badge updater (no re-render) ---------- */
 function updateBadges(){
-  // read latest state from __docs and patch only text/appearance
   const map = new Map(__docs.map(x=>[x.id, x]));
   $$('#list .card').forEach(card=>{
     const id = card.dataset.id;
-    const it = map.get(id);
-    if (!it) return;
+    const it = map.get(id); if (!it) return;
 
     // Score badge + button dim
     const sRem = remainingScore(it);
     const scoreReady = sRem === 0;
+
+    // badges: order is Score, Reset, Delete
     const badges = card.querySelectorAll('.toolbar .badge');
-    // badge[0] is score badge (because we render it first)
-    if (badges[0]) badges[0].outerHTML = scoreReady
-      ? '<span class="badge ok">Score: Ready</span>'
-      : `<span class="badge wait">Score: Wait ${human(sRem)}</span>`;
-    const btnA = card.querySelector('[data-action="plusA"]');
-    const btnB = card.querySelector('[data-action="plusB"]');
-    btnA.classList.toggle('dim', !scoreReady);
-    btnB.classList.toggle('dim', !scoreReady);
+    if (badges[0]) {
+      badges[0].outerHTML = scoreReady
+        ? '<span class="badge ok">Score: Ready</span>'
+        : `<span class="badge wait">Score: Wait ${human(sRem)}</span>`;
+    }
+    card.querySelector('[data-action="plusA"]').classList.toggle('dim', !scoreReady);
+    card.querySelector('[data-action="plusB"]').classList.toggle('dim', !scoreReady);
 
     // Reset badge
     const rRem = remainingArm(it.resetArmAt);
-    const armed = !!it.resetArmAt;
-    const resetBadgeHTML = !armed
+    const rArmed = !!it.resetArmAt;
+    const resetHTML = !rArmed
       ? '<span class="badge">Reset: Tap to arm</span>'
-      : (rRem===0 ? '<span class="badge ok">Reset: Ready to confirm</span>' : `<span class="badge wait">Reset: Armed — Wait ${human(rRem)}</span>`);
-    if (badges[1]) badges[1].outerHTML = resetBadgeHTML; // second badge
+      : (rRem===0 ? '<span class="badge ok">Reset: Ready to confirm</span>'
+                  : `<span class="badge wait">Reset: Armed — Wait ${human(rRem)}</span>`);
+    if (badges[1]) badges[1].outerHTML = resetHTML;
+
+    // Delete badge
+    const dRem = remainingArm(it.deleteArmAt);
+    const dArmed = !!it.deleteArmAt;
+    const deleteHTML = !dArmed
+      ? '<span class="badge">Delete: Tap to arm</span>'
+      : (dRem===0 ? '<span class="badge ok">Delete: Ready to confirm</span>'
+                  : `<span class="badge wait">Delete: Armed — Wait ${human(dRem)}</span>`);
+    if (badges[2]) badges[2].outerHTML = deleteHTML;
   });
 }
 
-/* ---------- Wire up page ---------- */
+/* ---------- Wire page ---------- */
 $('#add').addEventListener('click', addMatchup);
 $('#a,#b,#t').addEventListener('keydown', (e)=>{ if (e.key==='Enter') addMatchup(); });
 $('#search').addEventListener('input', listen);
 
+// Start realtime listener + countdown tick
 listen();
-// update countdown badges every second without re-rendering
 setInterval(updateBadges, 1000);
 </script>
 </body>
