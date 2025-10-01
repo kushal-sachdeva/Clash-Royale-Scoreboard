@@ -33,18 +33,20 @@ footer{margin:20px 0;color:var(--muted);font-size:12px;text-align:center}
 #empty{opacity:.8;text-align:center;padding:40px;border:1px dashed #2a2f47;border-radius:14px}
 input[type="search"]{grid-column:1/-1}
 .hidden{display:none}
-
-/* Centered popup */
+#toastBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity .15s ease;z-index:9998}
+#toastBackdrop.show{opacity:1;pointer-events:auto}
 #toast{
   position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
-  background:#151935;border:1px solid #2a2f47;color:var(--fg);
-  padding:16px 20px;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.35);
-  opacity:0;pointer-events:none;transition:opacity .15s ease;max-width:92vw;text-align:center;z-index:9999
+  background:#0f1330;border:1px solid #445; color:var(--fg);
+  padding:18px 22px;border-radius:14px;box-shadow:0 18px 60px rgba(0,0,0,.5);
+  opacity:0;pointer-events:none;transition:opacity .15s ease;max-width:92vw;text-align:center;z-index:9999;
+  font-size:16px;line-height:1.25
 }
 #toast.show{opacity:1}
-.toast-title{display:block;font-weight:800;margin-bottom:6px}
+.toast-title{display:block;font-weight:900;margin-bottom:8px;font-size:18px}
 .subtitle{font-size:13px;color:var(--muted)}
 .title{font-weight:700}
+.button.disabled-look{opacity:.55;filter:saturate(.4);cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -64,13 +66,13 @@ input[type="search"]{grid-column:1/-1}
   <hr />
   <footer>A Kushal Sachdeva Production</footer>
 </div>
+<div id="toastBackdrop"></div>
 <div id="toast"></div>
 
 <!-- Firebase CDN -->
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 <script>
-  /* === Firebase init (your real config) === */
   const firebaseConfig = {
     apiKey: "AIzaSyClcpvLfQy4OiiuDhAUxOFqqUgst474tAA",
     authDomain: "clashroyalescore-362e0.firebaseapp.com",
@@ -81,138 +83,76 @@ input[type="search"]{grid-column:1/-1}
     measurementId: "G-1NK8D02HTF"
   };
   firebase.initializeApp(firebaseConfig);
-  const db = firebase.firestore();
+  const db=firebase.firestore();
 
-  /* === Constants & helpers === */
-  const SCORE_COOLDOWN_MS = 120000;   // 2 min
-  const ACTION_WINDOW_MS  = 600000;   // 10 min (two-tap window for reset/delete)
+  const SCORE_COOLDOWN_MS=120000;   // 2 minutes
+  const RESET_COOLDOWN_MS=600000;   // 10 minutes
+  const DELETE_COOLDOWN_MS=600000;  // 10 minutes (delete)
 
-  const $  = q => document.querySelector(q);
-  const $$ = q => document.querySelectorAll(q);
-  const human = (ms) => {
-    const s = Math.ceil(ms/1000); const m = Math.floor(s/60); const r = s%60;
-    return m ? `${m}m ${r}s` : `${r}s`;
-  };
-  const coll = () => db.collection('matchups');
+  const $=q=>document.querySelector(q);
+  const $$=q=>document.querySelectorAll(q);
+  const human=ms=>{const s=Math.ceil(ms/1000);const m=Math.floor(s/60);const r=s%60;return m?`${m}m ${r}s`:`${r}s`};
+  const coll=()=>db.collection('matchups');
+  const toast=(msg, title)=>{const el=$('#toast');const bg=$('#toastBackdrop');el.innerHTML=title?`<span class="toast-title">${title}</span>${msg}`:msg;bg.classList.add('show');el.classList.add('show');clearTimeout(window.__toastT);window.__toastT=setTimeout(()=>{el.classList.remove('show');bg.classList.remove('show')},3000)}
 
-  /* centered popup with matchup title in first line if present */
-  const toast = (msg, title) => {
-    const el = $('#toast');
-    el.innerHTML = title ? `<span class="toast-title">${title}</span>${msg}` : msg;
-    el.classList.add('show');
-    setTimeout(()=>el.classList.remove('show'), 2000);
+  const addMatchup=async()=>{
+    const a=$('#a').value.trim(),b=$('#b').value.trim(),title=$('#t').value.trim();
+    if(!a||!b)return toast('Enter both player names');
+    await coll().add({a,b,title,sa:0,sb:0,created:firebase.firestore.FieldValue.serverTimestamp(),lastUpdate:null,lastReset:null,lastDelete:null});
+    $('#a').value='';$('#b').value='';$('#t').value='';
   };
 
-  /* remaining timers */
-  const remainingScore = (d) => {
-    const last = d.lastUpdate ? d.lastUpdate.toMillis() : 0;
-    return Math.max(0, SCORE_COOLDOWN_MS - (Date.now() - last));
-  };
-  const remainingArm    = (ts) => {
-    const t = ts ? (ts.toMillis ? ts.toMillis() : ts) : 0;
-    return Math.max(0, ACTION_WINDOW_MS - (Date.now() - t));
-  };
+  const remainingScore=(d)=>{
+    const last=d.lastUpdate?d.lastUpdate.toMillis():0;return Math.max(0,SCORE_COOLDOWN_MS-(Date.now()-last));
+  }
+  const remainingReset=(d)=>{
+    const last=d.lastReset?d.lastReset.toMillis():0;return Math.max(0,RESET_COOLDOWN_MS-(Date.now()-last));
+  }
+  const remainingDelete=(d)=>{
+    const last=d.lastDelete?d.lastDelete.toMillis():0;
+    const createdMs=d.created? (d.created.toMillis? d.created.toMillis() : d.created) : 0;
+    return Math.max(0,DELETE_COOLDOWN_MS-(Date.now()-last),DELETE_COOLDOWN_MS-(Date.now()-createdMs));
+  }
 
-  /* derive readable state for badges */
-  const resetState  = (d) => {
-    const armed = !!d.resetArmAt;
-    const rem   = remainingArm(d.resetArmAt);
-    return { armed, rem, ready: armed && rem === 0 };
-  };
-  const deleteState = (d) => {
-    const armed = !!d.deleteArmAt;
-    const rem   = remainingArm(d.deleteArmAt);
-    return { armed, rem, ready: armed && rem === 0 };
-  };
-  /* === Actions: add, +1, two-tap reset/delete === */
-
-  const addMatchup = async () => {
-    const a = $('#a').value.trim(), b = $('#b').value.trim(), title = $('#t').value.trim();
-    if (!a || !b) return toast('Enter both player names');
-    await coll().add({
-      a, b, title,
-      sa: 0, sb: 0,
-      created: firebase.firestore.FieldValue.serverTimestamp(),
-      lastUpdate: null,
-      resetArmAt: null,
-      deleteArmAt: null
-    });
-    $('#a').value=''; $('#b').value=''; $('#t').value='';
+  const bump=async(id,side)=>{
+    const ref=coll().doc(id);
+    const snap=await ref.get();
+    const d=snap.data();
+    const rem=remainingScore(d);
+    if(rem>0){toast(`2 min cooldown — ${human(rem)} left (anti‑tampering)`);return;}
+    await db.runTransaction(async(tx)=>{
+      const s=await tx.get(ref); if(!s.exists) throw new Error('missing');
+      const cur=s.data();
+      const incA=side==='a'?1:0; const incB=side==='b'?1:0;
+      tx.update(ref,{sa:cur.sa+incA,sb:cur.sb+incB,lastUpdate:firebase.firestore.FieldValue.serverTimestamp()});
+    }).catch(e=>toast(e.message));
   };
 
-  const bump = async (id, side, metaTitle) => {
-    const ref = coll().doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) return;
-    const d = snap.data();
-    const rem = remainingScore(d);
-    if (rem > 0) return toast(`Wait ${human(rem)} before adding (+1) — anti-tampering`, metaTitle);
-
-    await db.runTransaction(async (tx) => {
-      const s = await tx.get(ref); if (!s.exists) throw new Error('missing');
-      const cur = s.data();
-      tx.update(ref, {
-        sa: cur.sa + (side === 'a' ? 1 : 0),
-        sb: cur.sb + (side === 'b' ? 1 : 0),
-        lastUpdate: firebase.firestore.FieldValue.serverTimestamp()
-      });
-    });
-    toast('Score added', metaTitle);
+  const reset=async(id)=>{
+    const ref=coll().doc(id);
+    const snap=await ref.get();
+    const d=snap.data();
+    const rem=remainingReset(d);
+    if(rem>0){toast(`Reset has 10 min cooldown — ${human(rem)} left (anti‑tampering)`);return;}
+    await db.runTransaction(async(tx)=>{
+      const s=await tx.get(ref); if(!s.exists) throw new Error('missing');
+      tx.update(ref,{sa:0,sb:0,lastUpdate:null,lastReset:firebase.firestore.FieldValue.serverTimestamp()});
+    }).catch(e=>toast(e.message));
   };
 
-  const onReset = async (id, metaTitle) => {
-    const ref = coll().doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) return;
-    const d = snap.data();
-    const { armed, rem, ready } = resetState(d);
-
-    // Tap 1 → arm
-    if (!armed) {
-      await ref.update({ resetArmAt: firebase.firestore.FieldValue.serverTimestamp() });
-      return toast('Reset armed. Come back in 10 minutes, then tap Reset again to confirm.', metaTitle);
-    }
-    // Armed but still counting down
-    if (!ready) {
-      return toast(`Reset armed — ${human(rem)} left before you can confirm.`, metaTitle);
-    }
-    // Tap 2 after 10 min → perform reset
-    await db.runTransaction(async (tx) => {
-      const s = await tx.get(ref); if (!s.exists) throw new Error('missing');
-      tx.update(ref, { sa: 0, sb: 0, lastUpdate: null, resetArmAt: null });
-    });
-    toast('Reset complete', metaTitle);
-  };
-
-  const onDelete = async (id, metaTitle) => {
-    const ref = coll().doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) return;
-    const d = snap.data();
-    const { armed, rem, ready } = deleteState(d);
-
-    // Tap 1 → arm
-    if (!armed) {
-      await ref.update({ deleteArmAt: firebase.firestore.FieldValue.serverTimestamp() });
-      return toast('Delete armed. Come back in 10 minutes, then tap Delete again to confirm.', metaTitle);
-    }
-    // Armed but still counting down
-    if (!ready) {
-      return toast(`Delete armed — ${human(rem)} left before you can confirm.`, metaTitle);
-    }
-    // Tap 2 after 10 min → delete
+  const remove=async(id)=>{
+    const ref=coll().doc(id);
+    const snap=await ref.get();
+    const d=snap.data();
+    const rem=remainingDelete(d);
+    if(rem>0){toast(`Delete has 10 min cooldown — ${human(rem)} left (anti‑tampering)`);return;}
+    if(!confirm('Delete this matchup?'))return;
     await ref.delete();
-    toast('Matchup deleted', metaTitle);
   };
 
-  const rename = async (id, side, name) => {
-    if (!name || !name.trim()) return;
-    await coll().doc(id).update(side === 'a' ? { a: name.trim() } : { b: name.trim() });
-  };
+  const rename=async(id,side,name)=>{if(!name||!name.trim())return;await coll().doc(id).update(side==='a'?{a:name.trim()}:{b:name.trim()});};
 
-  /* === UI: cards, badges, live view === */
-
-  const card = (it) => {
+  const card=(it)=>{
     const scoreRem = remainingScore(it);
     const scoreReady = scoreRem === 0;
 
@@ -253,8 +193,8 @@ input[type="search"]{grid-column:1/-1}
       <div class="row">
         <div class="score">${it.sa} : ${it.sb}</div>
         <div class="controls">
-          <button class="button" data-action="plusA" ${scoreReady ? '' : 'disabled'}>+1 ${it.a}</button>
-          <button class="button" data-action="plusB" ${scoreReady ? '' : 'disabled'}>+1 ${it.b}</button>
+          <button class="button ${scoreReady?"":"disabled-look"}" data-action="plusA">+1 ${it.a}</button>
+          <button class="button ${scoreReady?"":"disabled-look"}" data-action="plusB">+1 ${it.b}</button>
         </div>
       </div>
       <div class="row">
@@ -264,68 +204,41 @@ input[type="search"]{grid-column:1/-1}
           <button class="button secondary" data-action="delete">Delete</button>
         </div>
       </div>
-    </div>`;
+    </div>`
   };
 
-  let unsubscribe = null;
-
-  const render = (docs) => {
-    const q = $('#search').value.trim().toLowerCase();
-    const items = docs
-      .filter(x => !q || x.a.toLowerCase().includes(q) || x.b.toLowerCase().includes(q) || (x.title||'').toLowerCase().includes(q))
-      .sort((x,y)=> (y.createdMs||0) - (x.createdMs||0));
-
-    $('#list').innerHTML = items.map(card).join('');
-    $('#empty').style.display = items.length ? 'none' : 'block';
-
-    $$('#list .card').forEach(el => {
-      const id = el.getAttribute('data-id');
-      const title = el.querySelector('.subtitle')?.textContent || '';
-
-      el.querySelector('[data-action="plusA"]').addEventListener('click', ()=> bump(id, 'a', title));
-      el.querySelector('[data-action="plusB"]').addEventListener('click', ()=> bump(id, 'b', title));
-      el.querySelector('[data-action="reset"]').addEventListener('click', ()=> onReset(id, title));
-      el.querySelector('[data-action="delete"]').addEventListener('click', ()=> onDelete(id, title));
-
+  let unsubscribe=null;
+  const render=(docs)=>{
+    const q=$('#search').value.trim().toLowerCase();
+    const items=docs.filter(x=>!q||x.a.toLowerCase().includes(q)||x.b.toLowerCase().includes(q)||(x.title||'').toLowerCase().includes(q));
+    $('#list').innerHTML=items.map(card).join('');
+    $('#empty').style.display=items.length?'none':'block';
+    $$('#list .card').forEach(el=>{
+      const id=el.getAttribute('data-id');
+      el.querySelector('[data-action="plusA"]').addEventListener('click',()=>bump(id,'a'));
+      el.querySelector('[data-action="plusB"]').addEventListener('click',()=>bump(id,'b'));
+      el.querySelector('[data-action="reset"]').addEventListener('click',()=>reset(id));
+      el.querySelector('[data-action="delete"]').addEventListener('click',()=>remove(id));
       el.querySelectorAll('.editable').forEach(n=>{
-        n.addEventListener('click', ()=>{
-          const side = n.getAttribute('data-side');
-          const next = prompt('Rename', n.textContent);
-          if (next) rename(id, side, next);
-        });
+        n.addEventListener('click',()=>{const side=n.getAttribute('data-side');const next=prompt('Rename',n.textContent);if(next)rename(id,side,next)});
       });
     });
   };
 
-  const listen = () => {
-    if (unsubscribe) unsubscribe();
-    unsubscribe = coll().orderBy('created','desc').onSnapshot((snap) => {
-      const docs = [];
-      snap.forEach(d => {
-        const x = d.data();
-        docs.push({
-          id: d.id,
-          a: x.a, b: x.b, title: x.title || '',
-          sa: x.sa, sb: x.sb,
-          created: x.created || null,
-          createdMs: x.created ? x.created.toMillis() : 0,
-          lastUpdate: x.lastUpdate || null,
-          resetArmAt: x.resetArmAt || null,
-          deleteArmAt: x.deleteArmAt || null
-        });
-      });
+  const listen=()=>{
+    if(unsubscribe)unsubscribe();
+    unsubscribe=coll().orderBy('created','desc').onSnapshot(snap=>{
+      const docs=[];
+      snap.forEach(d=>{const x=d.data();docs.push({id:d.id,a:x.a,b:x.b,title:x.title||'',sa:x.sa,sb:x.sb,created:x.created?x.created:0,lastUpdate:x.lastUpdate||null,lastReset:x.lastReset||null,lastDelete:x.lastDelete||null});});
       render(docs);
     });
   };
 
-  /* === Wire up === */
-  $('#add').addEventListener('click', addMatchup);
-  $('#a,#b,#t').addEventListener('keydown', (e)=>{ if (e.key==='Enter') addMatchup(); });
-  $('#search').addEventListener('input', listen);
-
+  $('#add').addEventListener('click',addMatchup);
+  $('#a,#b,#t').addEventListener('keydown',e=>{if(e.key==='Enter')addMatchup()});
+  $('#search').addEventListener('input',listen);
   listen();
-  // light polling to refresh countdown badges every second
-  setInterval(listen, 1000);
+  setInterval(listen,1000);
 </script>
 </body>
 </html>
