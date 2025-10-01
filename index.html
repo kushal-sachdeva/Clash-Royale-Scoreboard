@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Clash Royale Global Scoreboard</title>
+<style>
+:root{--bg:#0f1221;--card:#151935;--muted:#9aa0b4;--fg:#eaeaf2;--accent:#6ea8fe}
+*{box-sizing:border-box}
+body{margin:0;background:linear-gradient(180deg,#0d1020 0%,#0f1221 100%);color:var(--fg);font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.container{max-width:980px;margin:32px auto;padding:0 16px}
+h1{font-size:28px;margin:0 0 16px}
+.topbar{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:20px}
+.input{background:var(--card);border:1px solid #222748;border-radius:10px;padding:10px 12px;color:var(--fg);outline:none;min-width:180px}
+.button{background:var(--accent);border:none;border-radius:10px;color:#0b1023;padding:10px 14px;font-weight:700;cursor:pointer;transition:transform .06s ease}
+.button:active{transform:translateY(1px)}
+.button.secondary{background:#222748;color:var(--fg)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}
+.card{background:var(--card);border:1px solid #222748;border-radius:14px;padding:14px;display:flex;flex-direction:column;gap:12px}
+.row{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.vs{font-weight:800;letter-spacing:.3px}
+.name{font-weight:700}
+.score{font-size:34px;font-weight:900}
+.controls{display:flex;gap:8px}
+.small{font-size:12px;color:var(--muted)}
+.badge{font-size:11px;border:1px solid #2a2f47;border-radius:999px;padding:4px 8px;color:var(--muted)}
+.badge.ok{color:#0a1b12;border-color:#1a3a2a;background:rgba(101,212,140,.18)}
+.badge.wait{color:#1a203a;border-color:#2a2f47;background:rgba(110,168,254,.16)}
+.badge.warn{color:#2b0e11;border-color:#3a1a1e;background:rgba(240,113,120,.2)}
+.toolbar{display:flex;gap:6px}
+hr{border:none;border-top:1px solid #232845;margin:18px 0}
+footer{margin:20px 0;color:var(--muted);font-size:12px;text-align:center}
+#empty{opacity:.8;text-align:center;padding:40px;border:1px dashed #2a2f47;border-radius:14px}
+input[type="search"]{flex:1}
+.hidden{display:none}
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>Clash Royale Global Scoreboard</h1>
+  <div class="topbar">
+    <input id="a" class="input" placeholder="Player A" />
+    <span class="small">vs</span>
+    <input id="b" class="input" placeholder="Player B" />
+    <button id="add" class="button">Add Matchup</button>
+    <input id="search" class="input" type="search" placeholder="Search matchups" />
+  </div>
+  <div id="empty" class="small">No matchups yet. Add one above.</div>
+  <div id="list" class="grid"></div>
+  <hr />
+  <footer>Global data with 2‑minute cooldown per matchup, enforced server‑side.</footer>
+</div>
+
+<!-- Firebase CDN -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+<script>
+  const firebaseConfig = {
+    apiKey: "AIzaSyClcpvLfQy4OiiuDhAUxOFqqUgst474tAA",
+    authDomain: "clashroyalescore-362e0.firebaseapp.com",
+    projectId: "clashroyalescore-362e0",
+    storageBucket: "clashroyalescore-362e0.firebasestorage.app",
+    messagingSenderId: "764219519441",
+    appId: "1:764219519441:web:454f203bcdb3efd3e2b0f0",
+    measurementId: "G-1NK8D02HTF"
+  };
+  firebase.initializeApp(firebaseConfig);
+  const db=firebase.firestore();
+
+  const COOLDOWN_MS=120000;
+  const $=q=>document.querySelector(q);
+  const $$=q=>document.querySelectorAll(q);
+  const human=ms=>{const s=Math.ceil(ms/1000);const m=Math.floor(s/60);const r=s%60;return m?`${m}m ${r}s`:`${r}s`};
+  const coll=()=>db.collection('matchups');
+
+  const addMatchup=async()=>{
+    const a=$('#a').value.trim(),b=$('#b').value.trim();
+    if(!a||!b)return;
+    await coll().add({a,b,sa:0,sb:0,created:firebase.firestore.FieldValue.serverTimestamp(),lastUpdate:null});
+    $('#a').value='';$('#b').value='';
+  };
+
+  const bump=async(id,side)=>{
+    const ref=coll().doc(id);
+    await db.runTransaction(async(tx)=>{
+      const snap=await tx.get(ref);
+      if(!snap.exists)throw new Error('missing');
+      const d=snap.data();
+      const last=d.lastUpdate?d.lastUpdate.toMillis():0;
+      const now=Date.now();
+      if(now-last<COOLDOWN_MS)throw new Error('cooldown');
+      const incA=side==='a'?1:0; const incB=side==='b'?1:0;
+      tx.update(ref,{sa:d.sa+incA,sb:d.sb+incB,lastUpdate:firebase.firestore.FieldValue.serverTimestamp()});
+    });
+  };
+
+  const rename=async(id,side,name)=>{if(!name||!name.trim())return;await coll().doc(id).update(side==='a'?{a:name.trim()}:{b:name.trim()});};
+  const reset=async(id)=>{await coll().doc(id).update({sa:0,sb:0,lastUpdate:null});};
+  const remove=async(id)=>{await coll().doc(id).delete();};
+
+  const card=(it)=>{
+    const now=Date.now();
+    const last=it.lastUpdate?it.lastUpdate.toMillis():0;
+    const rem=Math.max(0,COOLDOWN_MS-(now-last));
+    const ok=rem===0;
+    const lead=it.sa===it.sb?'Tied':it.sa>it.sb?`${it.a} leading`:`${it.b} leading`;
+    return `
+    <div class="card" data-id="${it.id}">
+      <div class="row">
+        <div class="vs"><span class="name editable" data-side="a">${it.a}</span> vs <span class="name editable" data-side="b">${it.b}</span></div>
+        <div class="toolbar">
+          <span class="badge">${lead}</span>
+          ${ok?`<span class="badge ok">Ready</span>`:`<span class="badge wait">Wait ${human(rem)}</span>`}
+        </div>
+      </div>
+      <div class="row">
+        <div class="score">${it.sa} : ${it.sb}</div>
+        <div class="controls">
+          <button class="button" data-action="plusA" ${ok?'':'disabled'}>+1 ${it.a}</button>
+          <button class="button" data-action="plusB" ${ok?'':'disabled'}>+1 ${it.b}</button>
+        </div>
+      </div>
+      <div class="row">
+        <div class="small">Last add: ${it.lastUpdate?it.lastUpdate.toDate().toLocaleString():"—"}</div>
+        <div class="controls">
+          <button class="button secondary" data-action="reset">Reset</button>
+          <button class="button secondary" data-action="delete">Delete</button>
+        </div>
+      </div>
+    </div>`
+  };
+
+  let unsubscribe=null;
+  const render=(docs)=>{
+    const q=$('#search').value.trim().toLowerCase();
+    const items=docs.filter(x=>!q||x.a.toLowerCase().includes(q)||x.b.toLowerCase().includes(q));
+    $('#list').innerHTML=items.map(card).join('');
+    $('#empty').style.display=items.length?'none':'block';
+    $$('#list .card').forEach(el=>{
+      const id=el.getAttribute('data-id');
+      el.querySelector('[data-action="plusA"]').addEventListener('click',()=>bump(id,'a').catch(e=>alert(e.message)));
+      el.querySelector('[data-action="plusB"]').addEventListener('click',()=>bump(id,'b').catch(e=>alert(e.message)));
+      el.querySelector('[data-action="reset"]').addEventListener('click',()=>reset(id));
+      el.querySelector('[data-action="delete"]').addEventListener('click',()=>{if(confirm('Delete this matchup?'))remove(id)});
+      el.querySelectorAll('.editable').forEach(n=>{
+        n.addEventListener('click',()=>{const side=n.getAttribute('data-side');const next=prompt('Rename',n.textContent);if(next)rename(id,side,next)});
+      });
+    });
+  };
+
+  const listen=()=>{
+    if(unsubscribe)unsubscribe();
+    unsubscribe=coll().orderBy('created','desc').onSnapshot(snap=>{
+      const docs=[];
+      snap.forEach(d=>{const x=d.data();docs.push({id:d.id,a:x.a,b:x.b,sa:x.sa,sb:x.sb,created:x.created?x.created.toMillis():0,lastUpdate:x.lastUpdate||null});});
+      render(docs);
+    });
+  };
+
+  $('#add').addEventListener('click',addMatchup);
+  $('#a,#b').addEventListener('keydown',e=>{if(e.key==='Enter')addMatchup()});
+  $('#search').addEventListener('input',listen);
+  listen();
+  setInterval(listen,1000);
+</script>
+</body>
+</html>
